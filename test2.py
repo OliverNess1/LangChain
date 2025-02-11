@@ -5,6 +5,7 @@ from langchain_groq import ChatGroq
 from langchain_community.tools import Tool
 from langchain.agents import initialize_agent, AgentType
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from menu import menu 
 
 
 load_dotenv("API.env")
@@ -16,79 +17,131 @@ os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 # Initialize the AI model
 llm = ChatGroq(model="deepseek-r1-distill-llama-70b", temperature=0, max_retries=2)
 
-# Menu with Prices
-menu = {
-    "burger": 5.99,
-    "pizza": 8.99,
-    "soda": 1.99,
-    "fries": 2.99,
-    "salad": 4.49
-}
-
 # Shopping Cart (Initially Empty)
 shopping_cart = {}
 
-# Function: Add Item to Cart
 def add_to_cart(args) -> str:
-    """Adds an item to the shopping cart."""
+    """Adds an item to the shopping cart, allowing for modifications."""
     if isinstance(args, str):  
         try:
-            args = json.loads(args.replace("'", '"'))  # Ensure valid JSON format
+            args = json.loads(args.replace("'", '"'))
         except json.JSONDecodeError:
             return "Invalid input format. Please provide a valid item and quantity."
 
-    item = args.get("item", "").lower()
-    quantity = int(args.get("quantity", 1))  # Default to 1 if not provided
+    item = args.get("item", "").strip().lower()
+    quantity = int(args.get("quantity", 1))
+    modifications = tuple(sorted(args.get("modifications", [])))  # Convert modifications to a tuple (sorted for consistency)
 
     if item not in menu:
-        return f"{item} is not available on the menu."
-    
-    shopping_cart[item] = shopping_cart.get(item, 0) + quantity
-    return f"Added {quantity}x {item}(s) to your cart."
+        return f"Sorry, {item} is not available on the menu."
+
+    # Generate a unique key based on item + modifications
+    cart_key = (item, modifications)
+
+    # Ensure correct structure
+    if cart_key not in shopping_cart:
+        shopping_cart[cart_key] = {"quantity": 0, "modifications": modifications}
+
+    shopping_cart[cart_key]["quantity"] += quantity
+
+    mod_text = f" with {' and '.join(modifications)}" if modifications else ""
+    return f"Added {quantity}x {item}(s){mod_text} to your cart."
+
 
 # Function: Remove Item from Cart
 def remove_from_cart(args) -> str:
-    """Removes an item from the shopping cart."""
+    """Removes a specific variant of an item from the shopping cart."""
     if isinstance(args, str):  
         try:
-            args = json.loads(args.replace("'", '"'))  # Ensure valid JSON format
+            args = json.loads(args.replace("'", '"'))
         except json.JSONDecodeError:
             return "Invalid input format. Please provide a valid item and quantity."
 
-    item = args.get("item", "").lower()
+    item = args.get("item", "").strip().lower()
     quantity = int(args.get("quantity", 1))
+    modifications = tuple(sorted(args.get("modifications", [])))
 
-    if item not in shopping_cart:
-        return f"{item} is not in your cart."
-    
-    if shopping_cart[item] <= quantity:
-        del shopping_cart[item]  
-        return f"Removed all {item}(s) from your cart."
+    cart_key = (item, modifications)
+
+    if cart_key not in shopping_cart:
+        return f"{item} with the specified modifications is not in your cart."
+
+    if shopping_cart[cart_key]["quantity"] <= quantity:
+        del shopping_cart[cart_key]  
+        return f"Removed all {item}(s) {modifications} from your cart."
     else:
-        shopping_cart[item] -= quantity
-        return f"Removed {quantity}x {item}(s) from your cart."
+        shopping_cart[cart_key]["quantity"] -= quantity
+        return f"Removed {quantity}x {item}(s) {modifications} from your cart."
 
-# Function: View Cart
+
+
 def view_cart(args=None) -> str:
     """Displays the current items in the shopping cart."""
     if not shopping_cart:
         return "Your shopping cart is empty."
-    
+
     cart_summary = "\nShopping Cart:\n"
     total = 0
-    for item, qty in shopping_cart.items():
-        price = menu[item] * qty
-        cart_summary += f" - {qty}x {item.capitalize()} (${price:.2f})\n"
+
+    for (item, modifications), details in shopping_cart.items():
+        qty = details.get("quantity", 1)
+        mods = f" (Modified: {', '.join(modifications)})" if modifications else ""
+        price = menu[item]["price"] * qty
+        cart_summary += f" - {qty}x {item.capitalize()}{mods} (${price:.2f})\n"
         total += price
-    
+
     cart_summary += f"\nTotal: ${total:.2f}"
     return cart_summary
 
+
+
+
+def get_item_details(args) -> str:
+    """Fetches the description and available modifications for a menu item."""
+    print("DEBUG: Received args ->", args)  # Debugging
+
+    if isinstance(args, str):  
+        args = json.loads(args.replace("'", '"'))
+
+    item = args.get("item", "").strip().lower()
+    print("DEBUG: Checking item ->", item)  # Debugging
+
+    # Ensure item exists in the menu
+    if item not in menu:
+        print("DEBUG: Item not found in menu!")
+        return f"Sorry, {item} is not available on the menu."
+
+    details = menu[item]
+    
+    # Ensure details is a dictionary
+    if not isinstance(details, dict):  
+        print("DEBUG: Incorrect menu format for", item)
+        return f"Error: {item} in the menu is stored incorrectly."
+
+    description = details.get("description", "No description available.")
+    modifications = ", ".join(details.get("modifications", [])) or "None"
+
+    return (
+        f"Item: {item.capitalize()}\n"
+        f"Description: {description}\n"
+        f"Possible modifications: {modifications}\n"
+    )
+
+
+
+
+
 # Register AI Tools
+get_item_details_tool = Tool(
+    name="get_item_details",
+    func=get_item_details,
+    description="Retrieves the description and available modifications for a menu item. Requires the name of the item."
+)
+
 add_item_tool = Tool(
     name="add_to_cart",
     func=add_to_cart,
-    description="Adds an item to the shopping cart. Requires 'item' (name) and 'quantity' (number, default is 1)."
+    description="Adds an item to the shopping cart. Requires 'item' (name), 'quantity' (number, default is 1), and optional 'modifications' (list of changes)."
 )
 
 remove_item_tool = Tool(
@@ -100,12 +153,13 @@ remove_item_tool = Tool(
 view_cart_tool = Tool(
     name="view_cart",
     func=view_cart,
-    description="Displays the current shopping cart with items and total cost."
+    description="Displays the current shopping cart with items, modifications, and total cost."
 )
+
 
 # Create an AI Agent
 agent = initialize_agent(
-    tools=[add_item_tool, remove_item_tool, view_cart_tool],  
+    tools=[get_item_details_tool, add_item_tool, remove_item_tool, view_cart_tool],  
     llm=llm,
     agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True,
@@ -113,8 +167,17 @@ agent = initialize_agent(
 )
 
 message_history = [
-    SystemMessage(content="You are a helpful AI assistant managing a shopping cart. Users may ask you to add or remove items, and check their cart. If you cannot find the exact item attempt to figure out what the user means, for example a hamburger is a burger, or two salads is two salad items."),
+    SystemMessage(content=(
+        "You are a helpful AI assistant managing a shopping cart."
+        " Users may ask you to add or remove items, and check their cart."
+        " You can also provide item descriptions and possible modifications."
+        " When answering ingredient-related questions, such as 'Does the burger have pickles?',"
+        " always call the `get_item_details` function first."
+        " Then, use the description provided by `get_item_details()` to determine the correct response."
+        " Do not make assumptions—only state what is explicitly mentioned in the description."
+    ))
 ]
+
 
 print("\nAI-Powered Shopping Cart")
 print("You can ask the AI to add or remove items, and check your cart.")
