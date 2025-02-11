@@ -98,13 +98,12 @@ def view_cart(args=None) -> str:
 
 def get_item_details(args) -> str:
     """Fetches the description and available modifications for a menu item."""
-    print("DEBUG: Received args ->", args)  # Debugging
 
     if isinstance(args, str):  
         args = json.loads(args.replace("'", '"'))
 
     item = args.get("item", "").strip().lower()
-    print("DEBUG: Checking item ->", item)  # Debugging
+
 
     # Ensure item exists in the menu
     if item not in menu:
@@ -112,11 +111,6 @@ def get_item_details(args) -> str:
         return f"Sorry, {item} is not available on the menu."
 
     details = menu[item]
-    
-    # Ensure details is a dictionary
-    if not isinstance(details, dict):  
-        print("DEBUG: Incorrect menu format for", item)
-        return f"Error: {item} in the menu is stored incorrectly."
 
     description = details.get("description", "No description available.")
     modifications = ", ".join(details.get("modifications", [])) or "None"
@@ -126,9 +120,6 @@ def get_item_details(args) -> str:
         f"Description: {description}\n"
         f"Possible modifications: {modifications}\n"
     )
-
-
-
 
 
 # Register AI Tools
@@ -171,10 +162,19 @@ message_history = [
         "You are a helpful AI assistant managing a shopping cart."
         " Users may ask you to add or remove items, and check their cart."
         " You can also provide item descriptions and possible modifications."
-        " When answering ingredient-related questions, such as 'Does the burger have pickles?',"
+        " When answereing questions about the menu items, such as 'Does the burger have pickles?',"
         " always call the `get_item_details` function first."
+        " If the user asks to perform a complex action, like adding two burgers with different modifications, add each item separately."
         " Then, use the description provided by `get_item_details()` to determine the correct response."
         " Do not make assumptions—only state what is explicitly mentioned in the description."
+        " You must always structure your responses according to the following format:"
+        " Thought: (Explain your reasoning)"
+        " Action: (Choose one of the available functions)"
+        " Action Input: (Provide input in valid JSON format)"
+        " Observation: (Result from the function call)"
+        " Final Answer: (Summarize the result in a natural response to the user)"
+        " DO NOT return unstructured text. DO NOT use Markdown-style formatting (such as `<think>`)."
+        " Always follow the structured response format. If you don't know what to do, retry instead of making up a response."
     ))
 ]
 
