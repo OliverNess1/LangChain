@@ -5,20 +5,70 @@ from langchain_groq import ChatGroq
 from langchain_community.tools import Tool
 from langchain.agents import initialize_agent, AgentType
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from menu import menu 
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 
 load_dotenv("API.env")
+uri = os.getenv("MONGODB_URI")
+client = MongoClient(uri, server_api=ServerApi('1'))
+
+db = client["test"]
+menu_collection = db["menu"]
 
 # Initialize API keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+
+try:
+    client.admin.command('ping')
+    print("Pinged your deployment. You successfully connected to MongoDB!")
+except Exception as e:
+    print(e)
 
 # Initialize the AI model
 llm = ChatGroq(model="deepseek-r1-distill-llama-70b", temperature=0, max_retries=2)
 
 # Shopping Cart (Initially Empty)
 shopping_cart = {}
+
+def get_menu_item(args) -> list:
+    """Fetches menu items based on flexible search criteria (name, category, calorie limit, etc.)."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args.replace("'", '"'))
+        except json.JSONDecodeError:
+            return []
+
+    # Extract search filters
+    item_name = args.get("item_name", "").strip().lower()
+    category = args.get("category", "").strip().lower()
+    max_calories = args.get("max_calories", None)
+
+    # Build MongoDB query dynamically
+    query = {}
+
+    if item_name:
+        query["name"] = {"$regex": f"^{item_name}$", "$options": "i"}
+
+    if category:
+        query["category"] = {"$regex": f"^{category}$", "$options": "i"}
+
+    if max_calories is not None:
+        try:
+            max_calories = int(max_calories)
+            query["calories"] = {"$lte": max_calories}
+        except ValueError:
+            return "Invalid max_calories value. Please provide a number."
+
+    # Execute query and fetch results
+    items = list(menu_collection.find(query, {"_id": 0}))
+
+    if not items:
+        return "No matching items found."
+
+    return items
+
 
 def add_to_cart(args) -> str:
     """Adds an item to the shopping cart, allowing for modifications."""
@@ -28,27 +78,25 @@ def add_to_cart(args) -> str:
         except json.JSONDecodeError:
             return "Invalid input format. Please provide a valid item and quantity."
 
-    item = args.get("item", "").strip().lower()
+    item_name = args.get("item_name", "").strip().lower()
     quantity = int(args.get("quantity", 1))
-    modifications = tuple(sorted(args.get("modifications", [])))  # Convert modifications to a tuple (sorted for consistency)
+    modifications = tuple(sorted(args.get("modifications", [])))  
 
-    if item not in menu:
-        return f"Sorry, {item} is not available on the menu."
+    item = get_menu_item({"item_name": item_name})
 
-    # Generate a unique key based on item + modifications
-    cart_key = (item, modifications)
+    if not item:
+        return f"Sorry, {item_name} is not available on the menu."
 
-    # Ensure correct structure
+    cart_key = (item_name, modifications)
+
     if cart_key not in shopping_cart:
         shopping_cart[cart_key] = {"quantity": 0, "modifications": modifications}
 
     shopping_cart[cart_key]["quantity"] += quantity
 
     mod_text = f" with {' and '.join(modifications)}" if modifications else ""
-    return f"Added {quantity}x {item}(s){mod_text} to your cart."
+    return f"Added {quantity}x {item_name}(s){mod_text} to your cart."
 
-
-# Function: Remove Item from Cart
 def remove_from_cart(args) -> str:
     """Removes a specific variant of an item from the shopping cart."""
     if isinstance(args, str):  
@@ -57,126 +105,139 @@ def remove_from_cart(args) -> str:
         except json.JSONDecodeError:
             return "Invalid input format. Please provide a valid item and quantity."
 
-    item = args.get("item", "").strip().lower()
+    item_name = args.get("item_name", "").strip().lower()  # Convert to lowercase
     quantity = int(args.get("quantity", 1))
     modifications = tuple(sorted(args.get("modifications", [])))
 
-    cart_key = (item, modifications)
+    # 🔹 Normalize the key lookup by converting stored keys to lowercase
+    matching_key = None
+    for key in shopping_cart.keys():
+        if key[0].lower() == item_name and key[1] == modifications:
+            matching_key = key
+            break
 
-    if cart_key not in shopping_cart:
-        return f"{item} with the specified modifications is not in your cart."
+    if not matching_key:
+        return f"{item_name.capitalize()} with the specified modifications is not in your cart."
 
-    if shopping_cart[cart_key]["quantity"] <= quantity:
-        del shopping_cart[cart_key]  
-        return f"Removed all {item}(s) {modifications} from your cart."
+    # Remove the item or decrease its quantity
+    if shopping_cart[matching_key]["quantity"] <= quantity:
+        del shopping_cart[matching_key]  
+        return f"Removed all {matching_key[0]}(s) {modifications} from your cart."
     else:
-        shopping_cart[cart_key]["quantity"] -= quantity
-        return f"Removed {quantity}x {item}(s) {modifications} from your cart."
+        shopping_cart[matching_key]["quantity"] -= quantity
+        return f"Removed {quantity}x {matching_key[0]}(s) {modifications} from your cart."
 
 
-
-def view_cart(args=None) -> str:
-    """Displays the current items in the shopping cart."""
-    if not shopping_cart:
-        return "Your shopping cart is empty."
-
-    cart_summary = "\nShopping Cart:\n"
-    total = 0
-
-    for (item, modifications), details in shopping_cart.items():
-        qty = details.get("quantity", 1)
-        mods = f" (Modified: {', '.join(modifications)})" if modifications else ""
-        price = menu[item]["price"] * qty
-        cart_summary += f" - {qty}x {item.capitalize()}{mods} (${price:.2f})\n"
-        total += price
-
-    cart_summary += f"\nTotal: ${total:.2f}"
-    return cart_summary
-
-
-
-
-def get_item_details(args) -> str:
-    """Fetches the description and available modifications for a menu item."""
-
+def view_cart(args=None) -> dict:
+    """Returns the raw contents of the shopping cart."""
     if isinstance(args, str):  
-        args = json.loads(args.replace("'", '"'))
+        try:
+            args = json.loads(args.replace("'", '"'))  
+        except json.JSONDecodeError:
+            return {"error": "Invalid input format."}
 
-    item = args.get("item", "").strip().lower()
+    if isinstance(args, dict) and not args:
+        args = None  
+
+    if not shopping_cart:
+        return {"message": "Your shopping cart is empty."}
+
+    return shopping_cart
 
 
-    # Ensure item exists in the menu
-    if item not in menu:
-        print("DEBUG: Item not found in menu!")
-        return f"Sorry, {item} is not available on the menu."
+def load_menu_data():
+    """Fetches all menu items from the database at startup."""
+    menu_items = list(menu_collection.find({}, {"_id": 0}))  # Exclude MongoDB `_id` field
 
-    details = menu[item]
+    # Organize items by category for better readability
+    menu_by_category = {}
+    for item in menu_items:
+        category = item.get("category", "Uncategorized").lower()
+        if category not in menu_by_category:
+            menu_by_category[category] = []
+        menu_by_category[category].append(item)
 
-    description = details.get("description", "No description available.")
-    modifications = ", ".join(details.get("modifications", [])) or "None"
+    return menu_items, menu_by_category
 
-    return (
-        f"Item: {item.capitalize()}\n"
-        f"Description: {description}\n"
-        f"Possible modifications: {modifications}\n"
-    )
+def do_nothing(args=None) -> str:
+    """Handles cases where the user's input is unrelated to the menu or shopping cart."""
+    return ""
+
+
+
+
+# Load menu data at startup
+full_menu, menu_by_category = load_menu_data()
 
 
 # Register AI Tools
-get_item_details_tool = Tool(
-    name="get_item_details",
-    func=get_item_details,
-    description="Retrieves the description and available modifications for a menu item. Requires the name of the item."
-)
-
+do_nothing_tool = Tool(
+    "do_nothing",
+    do_nothing,
+    "Does nothing. When the user asks a question that is not related to the menu or shopping cart, kindly inform them that you are here to assist with menu items and their shopping cart.")
 add_item_tool = Tool(
-    name="add_to_cart",
-    func=add_to_cart,
-    description="Adds an item to the shopping cart. Requires 'item' (name), 'quantity' (number, default is 1), and optional 'modifications' (list of changes)."
-)
-
+    "add_to_cart", 
+    add_to_cart,
+    "Adds an item to the cart. When adding multiple different items, add them one at a time. When adding an item with modifications, include the modifications make sure the modification is possible by referencing the list of available modifications for that item.")
 remove_item_tool = Tool(
-    name="remove_from_cart",
-    func=remove_from_cart,
-    description="Removes an item from the shopping cart. Requires 'item' (name) and 'quantity' (number)."
-)
-
+    "remove_from_cart", 
+    remove_from_cart, 
+    "Removes an item from the cart.")
 view_cart_tool = Tool(
-    name="view_cart",
-    func=view_cart,
-    description="Displays the current shopping cart with items, modifications, and total cost."
+    "view_cart",
+    view_cart, 
+    "Displays the shopping cart.")
+get_menu_item_tool = Tool(
+    "get_menu_item",
+    get_menu_item,
+    "Retrieves menu items based on search criteria. Supports item_name (string), category (string), and max_calories (integer)."
 )
 
 
 # Create an AI Agent
 agent = initialize_agent(
-    tools=[get_item_details_tool, add_item_tool, remove_item_tool, view_cart_tool],  
+    tools=[add_item_tool, remove_item_tool, view_cart_tool, get_menu_item_tool, do_nothing_tool],  
     llm=llm,
     agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True,
-    handle_parsing_errors="Please reformat your response.",  
+    handle_parsing_errors=True,  
 )
+
+menu_text = "\n".join([
+    f"- {item['name']} ({item['category']}): ${item['price']:.2f}"
+    for item in full_menu
+])
 
 message_history = [
     SystemMessage(content=(
         "You are a helpful AI assistant managing a shopping cart."
-        " Users may ask you to add or remove items, and check their cart."
-        " You can also provide item descriptions and possible modifications."
-        " When answereing questions about the menu items, such as 'Does the burger have pickles?',"
-        " always call the `get_item_details` function first."
-        " If the user asks to perform a complex action, like adding two burgers with different modifications, add each item separately."
-        " Then, use the description provided by `get_item_details()` to determine the correct response."
-        " Do not make assumptions—only state what is explicitly mentioned in the description."
-        " You must always structure your responses according to the following format:"
-        " Thought: (Explain your reasoning)"
-        " Action: (Choose one of the available functions)"
-        " Action Input: (Provide input in valid JSON format)"
-        " Observation: (Result from the function call)"
-        " Final Answer: (Summarize the result in a natural response to the user)"
-        " DO NOT return unstructured text. DO NOT use Markdown-style formatting (such as `<think>`)."
-        " Always follow the structured response format. If you don't know what to do, retry instead of making up a response."
+        " The current menu includes the following items:\n\n"
+        f"{menu_text}\n\n"
+        "You should use this knowledge to answer questions about the menu."
+        " Always use get_menu_item to search for menu items."
+        " When calling functions, DO NOT wrap JSON in backticks (`) or Markdown formatting."
+        " Return JSON as plain text with no special characters."
+        " Examples:"
+        " - Correct: { \"category\": \"burgers\" }"
+        " - Incorrect: {\"category\": \"burgers\"}"
+        " Format responses as follows:"
+        " Thought: (Explain your reasoning, no backticks)"
+        " Action: (Choose one function, no backticks)"
+        " Action Input: (Valid JSON, no backticks)"
+        " Observation: (Function result, no backticks)"
+        " Final Answer: (User-friendly response, no special formatting)"
+        "When adding an item with modifications, include the modifications make sure the modification is possible by referencing the list of available modifications for that item. "
+        "for example input should look like: { \"item_name\": \"Big Mac\", \"modifications\": [] the list of modifications may have any number, 0 or greater of unique modifications."
+         " But it may not have contradictory modifications. For example, you may not have both \"no pickles\" and \"extra pickles\" in the same modification list."
+         "Each request will include the message history, only the act on the most recent request, the rest of the history is for context."
+         "When using view_cart, include the total cost for those items in the response."
+         ""
+         
     ))
 ]
+
+
+
 
 
 print("\nAI-Powered Shopping Cart")
@@ -186,22 +247,20 @@ print("Type 'exit' or 'quit' to stop.\n")
 while True:
     user_input = input("Your request: ")
 
-    # Exit condition
     if user_input.lower() in ["exit", "quit"]:
         print("\nThank you for shopping! Have a great day!")
         break
 
-    # Store the user's message
     message_history.append(HumanMessage(content=user_input))
 
-    # AI processes the query while keeping history
     try:
-        response = agent.invoke({"input": message_history})
+        response = agent.invoke({"input": message_history})  
         ai_response = response["output"]
 
-        # Store AI response in history
         message_history.append(AIMessage(content=ai_response))
 
         print(f"\nAI Response: {ai_response}\n")
+        print(message_history)
+        print(shopping_cart.items())
     except Exception as e:
         print(f"\nError: {str(e)}\n")
