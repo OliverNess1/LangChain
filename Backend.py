@@ -342,7 +342,7 @@ prompt_template = ChatPromptTemplate.from_messages(
             "Always use get_menu_item to search for menu items. "
             "When calling functions, DO NOT wrap JSON in backticks or Markdown formatting. "
             "When adding an item with modifications, ensure the modifications are valid. "
-            "If a user adds an entree, kindly ask if they would like to make it a combo. "
+            "If a user adds an entree, kindly ask if they would like to make it a combo, but only include this question in the final response. "
             "If the user agrees to make it a combo, remove the entree from the cart and add the combo instead."
             "If the user asks about a menu item, look up the item using get_menu_item and answer based on its details."
             "IMPORTANT: when you use a tool, you must use the results"
